@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Symbiote Cursor – Universal Drop‑In</title>
+  <style>
+    /* Just demo styling – the cursor itself doesn't need this */
+    body { background: #0a0c10; font-family: sans-serif; height: 100vh; margin: 0; }
+  </style>
+</head>
+<body>
+  <h1 style="color:white; text-align:center; padding-top:40vh;">Move your mouse &amp; click the ⚙️</h1>
+
+  <!-- ========== THE UNIVERSAL CURSOR SCRIPT ========== -->
+  <script>
+    (function() {
+      // ---- CONFIGURATION ----
+      const CONFIG = {
+        particleCount: 80,
+        crystalRadius: 55,
+        arrowScale: 1.2,
+        followerSpring: 0.15,
+        followerDamping: 0.85,
+        particleSpring: 0.07,
+        particleDamping: 0.90,
+        particleMaxSpeed: 3.0,
+        directLerp: 0.05,
+        movementDeadZone: 4,
+        movementHysteresis: 250,
+        shapeBlendDuration: 300,
+        idleEffect: 'orbitingAura',   // 'orbitingAura' | 'nebulaPulse' | 'dnaHelix'
+        colorPreset: 'frostByte',     // 'frostByte' | 'emberGlow' | 'voidViolet'
+        colors: {
+          frostByte: { primary: [140,200,255], secondary: [80,220,255], core: [255,255,255] },
+          emberGlow:  { primary: [255,160,60],  secondary: [255,200,80],  core: [255,255,255] },
+          voidViolet: { primary: [170,100,255], secondary: [255,80,200],   core: [255,255,255] }
+        }
+      };
+
+      // ---- INTERNAL STATE ----
+      const activeColors = { ...CONFIG.colors[CONFIG.colorPreset] };
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      canvas.style.cssText = 'position:fixed;top:0;left:0;z-index:2147483646;pointer-events:none;';
+      document.body.appendChild(canvas);
+
+      let mouseX = innerWidth/2, mouseY = innerHeight/2;
+      let prevMouseX = mouseX, prevMouseY = mouseY;
+      let followerX = mouseX, followerY = mouseY, followerVX=0, followerVY=0;
+      let smoothVX=0, smoothVY=0;
+      let isMoving=false, movementAccum=0, lastMoveTime=Date.now();
+      let blendFactor=0, lastBlendUpdate=performance.now();
+
+      // ---- PARTICLES ----
+      class Particle {
+        constructor() {
+          this.x = followerX; this.y = followerY;
+          this.vx = 0; this.vy = 0;
+          this.size = 2.8 + Math.random()*4;
+          this.life = 1;
+          this.baseColor = activeColors.primary;
+        }
+        update(targetX, targetY, moving, smoothAngle, smoothSpeed, blend, time) {
+          let idleX, idleY, arrowX, arrowY;
+          // Idle crystal shape
+          const angleI = (this.crystalIndex/CONFIG.particleCount)*Math.PI*2 + time*0.0012;
+          const rad = CONFIG.crystalRadius*(0.85+0.15*Math.sin(time*0.003+this.crystalIndex));
+          idleX = targetX + Math.cos(angleI)*rad + Math.cos(time*0.004+this.crystalIndex)*3;
+          idleY = targetY + Math.sin(angleI)*rad + Math.sin(time*0.004+this.crystalIndex)*3;
+          // Arrow shape
+          const angle = smoothAngle, speed = smoothSpeed;
+          const arrowLen = Math.min(20+speed*0.25,55)*CONFIG.arrowScale;
+          const tipX=targetX, tipY=targetY;
+          const baseX=targetX-Math.cos(angle)*arrowLen, baseY=targetY-Math.sin(angle)*arrowLen;
+          const t = this.arrowIndex/(CONFIG.particleCount-1);
+          arrowX = tipX + (baseX-tipX)*t;
+          arrowY = tipY + (baseY-tipY)*t;
+          const perp = (1-Math.abs(t-0.5)*2)*10;
+          arrowX += -Math.sin(angle)*perp;
+          arrowY += Math.cos(angle)*perp;
+          // Blend
+          const desX = idleX + (arrowX-idleX)*blend;
+          const desY = idleY + (arrowY-idleY)*blend;
+          // Chase follower
+          const dx = desX-this.x, dy = desY-this.y;
+          this.x += dx*CONFIG.directLerp;
+          this.y += dy*CONFIG.directLerp;
+          this.vx += dx*CONFIG.particleSpring;
+          this.vy += dy*CONFIG.particleSpring;
+          this.vx *= CONFIG.particleDamping;
+          this.vy *= CONFIG.particleDamping;
+          this.x += this.vx; this.y += this.vy;
+          const spd = Math.sqrt(this.vx*this.vx+this.vy*this.vy);
+          if(spd>CONFIG.particleMaxSpeed){this.vx=(this.vx/spd)*CONFIG.particleMaxSpeed;this.vy=(this.vy/spd)*CONFIG.particleMaxSpeed;}
+          if(blend>0.5&&this.arrowIndex>CONFIG.particleCount*0.7) this.life=Math.max(0.3,this.life-0.015);
+          else this.life=Math.min(1,this.life+0.025);
+        }
+        draw(ctx) {
+          const alpha=this.life*0.9;
+          ctx.save();
+          ctx.shadowColor=`rgba(${this.baseColor[0]},${this.baseColor[1]},${this.baseColor[2]},${alpha})`;
+          ctx.shadowBlur=7;
+          ctx.fillStyle=`rgba(${this.baseColor[0]},${this.baseColor[1]},${this.baseColor[2]},${alpha})`;
+          ctx.beginPath();ctx.arc(this.x,this.y,this.size,0,Math.PI*2);ctx.fill();
+          ctx.fillStyle=`rgba(255,255,255,${alpha*0.8})`;
+          ctx.beginPath();ctx.arc(this.x,this.y,this.size*0.5,0,Math.PI*2);ctx.fill();
+          ctx.restore();
+        }
+      }
+
+      let particles = [];
+      function createParticles() {
+        particles = [];
+        for(let i=0;i<CONFIG.particleCount;i++){
+          const p = new Particle();
+          p.crystalIndex=i; p.arrowIndex=i;
+          particles.push(p);
+        }
+      }
+      createParticles();
+
+      // ---- IDLE EFFECTS ----
+      function drawOrbitingAura(ctx, time) {
+        const orbCount=14, radius=60+10*Math.sin(time*0.005);
+        for(let i=0;i<orbCount;i++){
+          const a=(i/orbCount)*Math.PI*2+time*0.001;
+          const x=followerX+Math.cos(a)*radius, y=followerY+Math.sin(a)*radius;
+          const alpha=0.5+0.3*Math.sin(time*0.01+i);
+          ctx.save();ctx.shadowColor=`rgba(${activeColors.secondary[0]},${activeColors.secondary[1]},${activeColors.secondary[2]},${alpha})`;ctx.shadowBlur=12;
+          ctx.fillStyle=`rgba(${activeColors.secondary[0]},${activeColors.secondary[1]},${activeColors.secondary[2]},${alpha})`;
+          ctx.beginPath();ctx.arc(x,y,3.2,0,Math.PI*2);ctx.fill();ctx.restore();
+        }
+      }
+      function drawNebulaPulse(ctx, time) {
+        const pulse=1+0.4*Math.sin(time*0.004);
+        for(let i=0;i<30;i++){
+          const a=(i/30)*Math.PI*2;
+          const r=(25+35*Math.sin(time*0.005+i))*pulse;
+          const x=followerX+Math.cos(a)*r, y=followerY+Math.sin(a)*r;
+          const alpha=0.6*(1-Math.abs(Math.sin(time*0.005+i)));
+          ctx.save();ctx.shadowColor=`rgba(${activeColors.secondary[0]},${activeColors.secondary[1]},${activeColors.secondary[2]},${alpha})`;ctx.shadowBlur=10;
+          ctx.fillStyle=`rgba(${activeColors.secondary[0]},${activeColors.secondary[1]},${activeColors.secondary[2]},${alpha})`;
+          ctx.beginPath();ctx.arc(x,y,2.5+alpha*2,0,Math.PI*2);ctx.fill();ctx.restore();
+        }
+      }
+      function drawDNAHelix(ctx, time) {
+        const helixR=30;
+        for(let s=0;s<2;s++){
+          const phase=s*Math.PI;
+          for(let i=0;i<50;i++){
+            const t=i/49;
+            const a=t*Math.PI*2*3+time*0.002+phase;
+            const x=followerX+Math.cos(a)*helixR;
+            const y=followerY+(t-0.5)*60+Math.sin(a)*8;
+            const alpha=0.5+0.3*Math.sin(time*0.01+i);
+            ctx.save();ctx.shadowColor=`rgba(${activeColors.secondary[0]},${activeColors.secondary[1]},${activeColors.secondary[2]},${alpha})`;ctx.shadowBlur=8;
+            ctx.fillStyle=`rgba(${activeColors.secondary[0]},${activeColors.secondary[1]},${activeColors.secondary[2]},${alpha})`;
+            ctx.beginPath();ctx.arc(x,y,2.2,0,Math.PI*2);ctx.fill();ctx.restore();
+          }
+        }
+      }
+
+      // ---- CORE DOT (always at real mouse) ----
+      function drawCore() {
+        ctx.save();ctx.shadowColor='rgba(255,255,255,0.95)';ctx.shadowBlur=14;
+        ctx.fillStyle='white';ctx.beginPath();ctx.arc(mouseX,mouseY,4.5,0,Math.PI*2);ctx.fill();
+        ctx.shadowBlur=22;ctx.fillStyle='rgba(255,255,255,0.6)';
+        ctx.beginPath();ctx.arc(mouseX,mouseY,6.5,0,Math.PI*2);ctx.fill();ctx.restore();
+      }
+
+      // ---- MOUSE LISTENERS ----
+      document.addEventListener('mousemove', e => {
+        const dx=e.clientX-mouseX, dy=e.clientY-mouseY;
+        smoothVX += (dx-smoothVX)*0.1;
+        smoothVY += (dy-smoothVY)*0.1;
+        prevMouseX=mouseX; prevMouseY=mouseY;
+        mouseX=e.clientX; mouseY=e.clientY;
+        movementAccum += Math.sqrt(dx*dx+dy*dy);
+        const now=Date.now();
+        if(!isMoving&&movementAccum>CONFIG.movementDeadZone){ isMoving=true; movementAccum=0; }
+        if(isMoving) movementAccum=0;
+        lastMoveTime=now;
+      });
+      setInterval(()=>{ if(isMoving&&Date.now()-lastMoveTime>CONFIG.movementHysteresis) isMoving=false; },50);
+
+      // ---- RESIZE ----
+      window.addEventListener('resize', ()=>{ canvas.width=innerWidth; canvas.height=innerHeight; });
+      canvas.width=innerWidth; canvas.height=innerHeight;
+
+      // ---- ANIMATION ----
+      function animate(time) {
+        if(!lastBlendUpdate) lastBlendUpdate=time;
+        const dt=time-lastBlendUpdate; lastBlendUpdate=time;
+        const blendTarget=isMoving?1:0;
+        const blendSpeed=1/CONFIG.shapeBlendDuration*dt;
+        if(blendFactor<blendTarget) blendFactor=Math.min(blendFactor+blendSpeed,blendTarget);
+        else if(blendFactor>blendTarget) blendFactor=Math.max(blendFactor-blendSpeed,blendTarget);
+
+        // Update follower
+        const fx=mouseX-followerX, fy=mouseY-followerY;
+        followerVX+=fx*CONFIG.followerSpring; followerVY+=fy*CONFIG.followerSpring;
+        followerVX*=CONFIG.followerDamping; followerVY*=CONFIG.followerDamping;
+        followerX+=followerVX; followerY+=followerVY;
+
+        ctx.clearRect(0,0,canvas.width,canvas.height);
+        const smoothAngle=Math.atan2(smoothVY,smoothVX);
+        const smoothSpeed=Math.sqrt(smoothVX*smoothVX+smoothVY*smoothVY);
+        particles.forEach(p=>{ p.update(followerX,followerY,isMoving,smoothAngle,smoothSpeed,blendFactor,time); p.draw(ctx); });
+
+        if(blendFactor<0.4) {
+          switch(CONFIG.idleEffect){
+            case 'orbitingAura': drawOrbitingAura(ctx,time); break;
+            case 'nebulaPulse': drawNebulaPulse(ctx,time); break;
+            case 'dnaHelix': drawDNAHelix(ctx,time); break;
+          }
+        }
+        drawCore();
+        requestAnimationFrame(animate);
+      }
+      requestAnimationFrame(animate);
+
+      // ---- PUBLIC API ----
+      const api = {
+        setColorPreset: (preset) => {
+          if(CONFIG.colors[preset]){
+            CONFIG.colorPreset=preset;
+            Object.assign(activeColors, CONFIG.colors[preset]);
+            particles.forEach(p=>p.baseColor=activeColors.primary);
+            updatePanelButtons();
+          }
+        },
+        setIdleEffect: (effect) => {
+          if(['orbitingAura','nebulaPulse','dnaHelix'].includes(effect)){
+            CONFIG.idleEffect=effect;
+            updatePanelButtons();
+          }
+        },
+        destroy: () => { canvas.remove(); panel.remove(); }
+      };
+
+      // ---- FLOATING CONTROL PANEL ----
+      const panel = document.createElement('div');
+      panel.innerHTML = `
+        <style>
+          .symbiote-panel { position:fixed; bottom:20px; right:20px; z-index:2147483647; font-family:system-ui; }
+          .symbiote-toggle { width:44px; height:44px; border-radius:50%; background:#1a1a2e; border:1px solid rgba(255,255,255,0.2);
+            color:white; font-size:22px; cursor:pointer; display:flex; align-items:center; justify-content:center; }
+          .symbiote-menu { display:none; background:#1a1a2e; border:1px solid rgba(255,255,255,0.15); border-radius:12px;
+            padding:12px; margin-top:8px; color:white; }
+          .symbiote-menu.open { display:block; }
+          .symbiote-menu label { display:block; font-size:12px; margin-bottom:6px; color:#aaa; }
+          .symbiote-btn-group { display:flex; gap:6px; margin-bottom:12px; }
+          .symbiote-btn { flex:1; padding:6px; background:rgba(255,255,255,0.05); border:1px solid rgba(255,255,255,0.2);
+            border-radius:6px; color:white; cursor:pointer; font-size:12px; text-align:center; }
+          .symbiote-btn.active { background:rgba(140,200,255,0.25); border-color:rgba(140,200,255,0.7); }
+        </style>
+        <div class="symbiote-panel">
+          <button class="symbiote-toggle" id="symbioteToggle">⚙️</button>
+          <div class="symbiote-menu" id="symbioteMenu">
+            <label>Idle Effect</label>
+            <div class="symbiote-btn-group" data-type="effect">
+              <button class="symbiote-btn active" data-value="orbitingAura">Aura</button>
+              <button class="symbiote-btn" data-value="nebulaPulse">Nebula</button>
+              <button class="symbiote-btn" data-value="dnaHelix">Helix</button>
+            </div>
+            <label>Color</label>
+            <div class="symbiote-btn-group" data-type="color">
+              <button class="symbiote-btn active" data-value="frostByte">Frost</button>
+              <button class="symbiote-btn" data-value="emberGlow">Ember</button>
+              <button class="symbiote-btn" data-value="voidViolet">Violet</button>
+            </div>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(panel);
+
+      const toggle = panel.querySelector('#symbioteToggle');
+      const menu = panel.querySelector('#symbioteMenu');
+      toggle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        menu.classList.toggle('open');
+      });
+      document.addEventListener('click', () => menu.classList.remove('open'));
+
+      function updatePanelButtons() {
+        // Update active states for effect buttons
+        panel.querySelectorAll('[data-type="effect"] .symbiote-btn').forEach(btn => {
+          btn.classList.toggle('active', btn.dataset.value === CONFIG.idleEffect);
+        });
+        // Update active states for color buttons
+        panel.querySelectorAll('[data-type="color"] .symbiote-btn').forEach(btn => {
+          btn.classList.toggle('active', btn.dataset.value === CONFIG.colorPreset);
+        });
+      }
+
+      // Attach button events
+      panel.querySelectorAll('[data-type="effect"] .symbiote-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          api.setIdleEffect(btn.dataset.value);
+        });
+      });
+      panel.querySelectorAll('[data-type="color"] .symbiote-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          api.setColorPreset(btn.dataset.value);
+        });
+      });
+
+      // Expose to window
+      window.SymbioteCursor = api;
+    })();
+  </script>
+</body>
+</html>
